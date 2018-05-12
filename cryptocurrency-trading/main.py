@@ -9,7 +9,9 @@ import pandas as pd
 import lightgbm as lgb
 from scipy.stats import spearmanr
 import scipy.stats
+from sklearn.model_selection import GridSearchCV
 
+from sklearn.metrics import make_scorer
 from backtester import calc_score, apply_on_test, test_generator, make_submission
 import utils
 
@@ -43,9 +45,10 @@ for exch, symbol, side, candles in tqdm.tqdm(utils.candles_loop(f1["body"])):
             RELEVANT_COLUMNS += [column]
 header = f1["header"][:]
 
-def custom_spearman(preds, y):
+def custom_spearman(y, preds):
     score, _ = scipy.stats.spearmanr(y, preds)
-    return 'spearman', score, True
+    return score
+    #return 'spearman', score, True
 
 def load_X_y(f, target, relevant):
     exch, pair, action, _ = TARGET_COLUMNS[0].split("/")
@@ -144,15 +147,20 @@ y_train = np.concatenate((y_train1, y_train2))
 del(X_train1, X_train2, y_train1, y_train2)
 
 # Fit simple regression model
-regr = lgb.LGBMRegressor(learning_rate=0.01, n_estimators=1000, num_leaves=15, silent=False, reg_alpha=1.0, n_jobs=4, random_state=2018)
-regr.fit(X_train, y_train.ravel(), eval_set=(X_val, y_val.ravel()), eval_metric=custom_spearman, early_stopping_rounds=500)
-preds = regr.predict(X_val)
-print(spearmanr(preds, y_val.ravel()))
-print("Best iteration = ", regr.best_iteration_)
-print("Best score = ", regr.best_score_)
+my_score_func = make_scorer(score_func=custom_spearman, greater_is_better=True)
+param_grid = [{'learning_rate' : [0.01], 'num_leaves': [15], 'reg_alpha': [0.3, 0.5]}]
+
+lgbm_regr = lgb.LGBMRegressor(learning_rate=0.01, n_estimators=1000, num_leaves=15, silent=False, reg_alpha=1.0, n_jobs=4, random_state=2018)
+grid_search = GridSearchCV(estimator=lgbm_regr, param_grid=param_grid, cv=2, scoring=my_score_func, verbose=2)
+grid_search.fit(X=X_train, y=y_train.ravel())
+
+print(grid_search.best_params_, grid_search.best_score_)
+best_lgbm_regr = grid_search.best_estimator_
+y_val_pred = best_lgbm_regr.predict(X_val)
+print("Spearman index on testset = ", spearmanr(y_val_pred, y_val.ravel()))
 
 f = open('BTC_USDT_2.pk', 'wb+')
-pk.dump(regr, f)
+pk.dump(best_lgbm_regr, f)
 f.close()
 
 f = open('BTC_USDT_2.pk', 'rb+')
