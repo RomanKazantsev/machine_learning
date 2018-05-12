@@ -40,7 +40,7 @@ for exch, symbol, side, candles in tqdm.tqdm(utils.candles_loop(f1["body"])):
     for name in header:
         # "hitbtc/BTC_USDT/buy/max_price"
         column = exch + "/" + symbol + "/" + side + "/" + name
-        if RELEVANT_CURRENCY in symbol and name in ["max_price", "amount", "number_of_trades"] \
+        if RELEVANT_CURRENCY in symbol and name in ["open_price", "min_price", "max_price", "amount", "number_of_trades"] \
                                        and exch in ['hitbtc', 'bitfinex2']:
             RELEVANT_COLUMNS += [column]
 header = f1["header"][:]
@@ -49,6 +49,10 @@ def custom_spearman(y, preds):
     score, _ = scipy.stats.spearmanr(y, preds)
     return score
     #return 'spearman', score, True
+
+def custom_spearman2(y, preds):
+    score, _ = scipy.stats.spearmanr(y, preds)
+    return 'spearman', score, True
 
 def load_X_y(f, target, relevant):
     exch, pair, action, _ = TARGET_COLUMNS[0].split("/")
@@ -146,25 +150,39 @@ X_train = np.vstack((X_train1, X_train2))
 y_train = np.concatenate((y_train1, y_train2))
 del(X_train1, X_train2, y_train1, y_train2)
 
-# Fit simple regression model
-my_score_func = make_scorer(score_func=custom_spearman, greater_is_better=True)
-param_grid = [{'learning_rate' : [0.01], 'num_leaves': [15], 'reg_alpha': [0.3, 0.5]}]
+def find_best_lgbm_regr(X_train, y_train):
+    # Fit simple regression model
+    my_score_func = make_scorer(score_func=custom_spearman, greater_is_better=True)
+    param_grid = [
+        {'learning_rate' : [0.01], 'num_leaves': [15], 'reg_alpha': [0.5, 1.0]},
+    #    {'learning_rate' : [0.01], 'num_leaves': [15], 'reg_lambda': [1.0]}
+    ]
 
-lgbm_regr = lgb.LGBMRegressor(learning_rate=0.01, n_estimators=1000, num_leaves=15, silent=False, reg_alpha=1.0, n_jobs=4, random_state=2018)
-grid_search = GridSearchCV(estimator=lgbm_regr, param_grid=param_grid, cv=2, scoring=my_score_func, verbose=2)
-grid_search.fit(X=X_train, y=y_train.ravel())
+    lgbm_regr = lgb.LGBMRegressor(n_estimators=1000, silent=False, n_jobs=4, random_state=2018)
+    grid_search = GridSearchCV(estimator=lgbm_regr, param_grid=param_grid, cv=2, scoring=my_score_func, verbose=2)
+    grid_search.fit(X=X_train, y=y_train.ravel())
 
-print(grid_search.best_params_, grid_search.best_score_)
-best_lgbm_regr = grid_search.best_estimator_
-y_val_pred = best_lgbm_regr.predict(X_val)
+    print(grid_search.best_params_, grid_search.best_score_)
+    best_lgbm_regr = grid_search.best_estimator_
+    return best_lgbm_regr
+
+def try_some_lgbm_regr(X_train, y_train, X_val, y_val):
+    lgbm_regr = lgb.LGBMRegressor(n_estimators=1000, learning_rate=0.01,
+                                  num_leaves=15, reg_alpha=0.5,
+                                  silent=False, n_jobs=4, random_state=2018)
+    lgbm_regr.fit(X_train, y_train.ravel(), eval_set=(X_val, y_val.ravel()),
+             eval_metric=custom_spearman2, early_stopping_rounds=500)
+    return lgbm_regr
+
+
+lgbm_regress = find_best_lgbm_regr(X_train, y_train)
+#lgbm_regress = try_some_lgbm_regr(X_train, y_train, X_val, y_val)
+y_val_pred = lgbm_regress.predict(X_val)
 print("Spearman index on testset = ", spearmanr(y_val_pred, y_val.ravel()))
 
+# dump the best model
 f = open('BTC_USDT_2.pk', 'wb+')
-pk.dump(best_lgbm_regr, f)
-f.close()
-
-f = open('BTC_USDT_2.pk', 'rb+')
-regr = pk.load(f)
+pk.dump(lgbm_regress, f)
 f.close()
 
 model = Model(['BTC_USDT'], RELEVANT_COLUMNS)
